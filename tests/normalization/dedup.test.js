@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { isSameEvent, DedupService } from "../../src/normalization/dedup.js";
+import { isSameEvent, isSuspiciouslyStale, REPLAY_STALENESS_GRACE_MS, DedupService } from "../../src/normalization/dedup.js";
 import { deriveLifecycleTransition } from "../../src/normalization/lifecycle.js";
 import {
   reissueOne,
@@ -36,6 +36,34 @@ describe("isSameEvent", () => {
   it("treats an identical alert_id as trivially the same event", () => {
     const alert = reissueOne();
     expect(isSameEvent(alert, alert)).toBe(true);
+  });
+});
+
+describe("isSuspiciouslyStale", () => {
+  it("is false for a real alert whose expires is comfortably after retrieved_at", () => {
+    expect(isSuspiciouslyStale(reissueOne())).toBe(false);
+  });
+
+  it("flags an alert whose expires is well in the past relative to its own retrieved_at", () => {
+    // A stale/previously-expired warning being replayed by a compromised
+    // or misconfigured source: expired two days before it was "retrieved".
+    const stale = reissueOne({
+      expires: "2026-09-19T08:00:00+11:00",
+      retrieved_at: "2026-09-21T08:35:00+11:00",
+    });
+    expect(isSuspiciouslyStale(stale)).toBe(true);
+  });
+
+  it("does not flag a timing gap within the grace window (ordinary clock skew/poll delay)", () => {
+    const barelyPast = reissueOne({
+      expires: "2026-09-21T08:34:00+11:00", // 1 minute before retrieved_at
+      retrieved_at: "2026-09-21T08:35:00+11:00",
+    });
+    expect(isSuspiciouslyStale(barelyPast, { replayGraceMs: REPLAY_STALENESS_GRACE_MS })).toBe(false);
+  });
+
+  it("does not flag when either timestamp is missing — that's a different (malformed-input) concern", () => {
+    expect(isSuspiciouslyStale(reissueOne({ expires: null }))).toBe(false);
   });
 });
 
@@ -81,5 +109,24 @@ describe("DedupService", () => {
 
     const readings = service.getReadingsForEvent(first.alert.event_id);
     expect(readings).toHaveLength(2);
+  });
+
+  it("surfaces isSuspiciouslyStale on ingest() without discarding the alert", () => {
+    const stale = reissueOne({
+      alert_id: "urn:oid:test.stale-replay",
+      event_id: "urn:oid:test.stale-replay",
+      expires: "2026-09-19T08:00:00+11:00",
+      retrieved_at: "2026-09-21T08:35:00+11:00",
+    });
+
+    const result = service.ingest(stale);
+
+    expect(result.isSuspiciouslyStale).toBe(true);
+    expect(result.alert.alert_id).toBe("urn:oid:test.stale-replay"); // flagged, not dropped
+  });
+
+  it("does not flag an ordinary reissue as suspiciously stale", () => {
+    const result = service.ingest(reissueOne());
+    expect(result.isSuspiciouslyStale).toBe(false);
   });
 });

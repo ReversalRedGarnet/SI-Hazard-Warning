@@ -103,6 +103,20 @@ export async function sendApproved({
   triggeredBy,
   rateLimiter,
 }) {
+  // KNOWN LIMITATION (audit finding M4, not fixed in that pass): the caller
+  // asserts expectedProfileId — i.e. "this message is a trusted official
+  // relay" / "a transformed/localized message" / "a manually authored
+  // emergency message" — and this function only checks that the approval
+  // request was actually approved under *that same asserted* profile. It
+  // does not, and currently cannot, independently verify the assertion
+  // itself against how the message was really constructed: `message`
+  // (a ConstructedMessage from messageConstruction.js) carries no
+  // "how was this authored" field to check against. A caller could pass
+  // TRUSTED_OFFICIAL_RELAY for a hand-typed emergency message and nothing
+  // here would catch it — only a correctly-behaving caller keeps this
+  // honest today. Closing this for real means adding an authorship/origin
+  // field to ConstructedMessage and checking it here; that's a real change
+  // to messageConstruction.js's own contract, out of scope for this pass.
   const request = approvalWorkflow.getRequest(approvalRequestId);
   if (!request) {
     throw new Error(`No approval request found for id: ${approvalRequestId}`);

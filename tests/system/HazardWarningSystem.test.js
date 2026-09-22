@@ -13,22 +13,35 @@ import { ApprovalProfile } from "../../src/governance/approvalPolicy.js";
 import { ApprovalDecision } from "../../src/governance/ApprovalWorkflow.js";
 import { RateLimiter, RateLimitExceededError } from "../../src/governance/RateLimiter.js";
 import { TEST_MODE_SYNTHETIC_PHONE_NUMBERS } from "../../src/governance/testModeRecipients.js";
+import { SourceHealthStatus } from "../../src/ingestion/SourceHealth.js";
 import { RSS_URL, buildStubFetch } from "./rawCapFixtures.js";
+import { reissueOne } from "../normalization/fixtures.js";
 
 const operator = createUser({ user_id: "op-1", role: Role.OPERATOR });
 const approver = createUser({ user_id: "appr-1", role: Role.APPROVER });
 
-function buildSystem({ environmentMode = EnvironmentMode.TEST, rateLimiter, subscriberStore } = {}) {
-  const hazardSource = new SIMSCAPAdapter({ rssUrl: RSS_URL, fetchImpl: buildStubFetch() });
+function buildSystem({
+  environmentMode = EnvironmentMode.TEST,
+  rateLimiter,
+  subscriberStore,
+  hazardSource,
+  now,
+  expectedPollIntervalMs,
+  auditLog,
+} = {}) {
+  const source = hazardSource ?? new SIMSCAPAdapter({ rssUrl: RSS_URL, fetchImpl: buildStubFetch() });
   const store = subscriberStore ?? new SubscriberStore();
   const provider = new MockSMSProvider({ defaultOutcome: { type: "accept" } });
 
   const system = new HazardWarningSystem({
-    hazardSource,
+    hazardSource: source,
     provider,
     subscriberStore: store,
     environmentMode,
     rateLimiter,
+    now,
+    expectedPollIntervalMs,
+    auditLog,
   });
 
   return { system, store, provider };
@@ -254,7 +267,16 @@ describe("HazardWarningSystem — no raw send path", () => {
     // specified — nothing else exists that could be called to dispatch.
     const publicMethods = Object.getOwnPropertyNames(HazardWarningSystem.prototype).filter((name) => name !== "constructor");
     expect(publicMethods.sort()).toEqual(
-      ["decideApproval", "getApprovalRequest", "getAuditEntries", "ingestAndProcess", "sendApproved", "submitForApproval", "verifyAuditChain"].sort(),
+      [
+        "decideApproval",
+        "getApprovalRequest",
+        "getAuditEntries",
+        "getSourceHealth",
+        "ingestAndProcess",
+        "sendApproved",
+        "submitForApproval",
+        "verifyAuditChain",
+      ].sort(),
     );
   });
 
@@ -293,5 +315,113 @@ describe("HazardWarningSystem — no raw send path", () => {
       triggeredBy: operator,
     });
     expect(provider.callLog).toHaveLength(1); // only sendApproved() ever reaches the provider
+  });
+});
+
+describe("HazardWarningSystem — source health (audit finding H2)", () => {
+  it("is UNAVAILABLE before any poll has ever succeeded", () => {
+    const { system } = buildSystem();
+    expect(system.getSourceHealth()).toBe(SourceHealthStatus.UNAVAILABLE);
+  });
+
+  it("goes HEALTHY -> DELAYED -> STALE as a fake clock advances without a new successful poll", async () => {
+    let now = 1_000_000;
+    const { system } = buildSystem({ now: () => now, expectedPollIntervalMs: 1_000 });
+
+    await system.ingestAndProcess();
+    expect(system.getSourceHealth()).toBe(SourceHealthStatus.HEALTHY);
+
+    now += 1_000 * 2; // 2x the expected interval since the last successful poll
+    expect(system.getSourceHealth()).toBe(SourceHealthStatus.DELAYED);
+
+    now += 1_000 * 2; // 4x total
+    expect(system.getSourceHealth()).toBe(SourceHealthStatus.STALE);
+  });
+
+  it("is UNAVAILABLE after a poll attempt that throws outright, and the error still propagates to the caller", async () => {
+    const failingSource = {
+      sourceName: "FAKE",
+      async fetchAlerts() {
+        throw new Error("network down");
+      },
+    };
+    const { system } = buildSystem({ hazardSource: failingSource });
+
+    await expect(system.ingestAndProcess()).rejects.toThrow("network down");
+    expect(system.getSourceHealth()).toBe(SourceHealthStatus.UNAVAILABLE);
+  });
+
+  it("recovers to HEALTHY on the next successful poll after an UNAVAILABLE one", async () => {
+    let failNext = true;
+    const flakySource = {
+      sourceName: "FAKE",
+      async fetchAlerts() {
+        if (failNext) {
+          failNext = false;
+          throw new Error("temporary outage");
+        }
+        return { alerts: [], failures: [] };
+      },
+    };
+    const { system } = buildSystem({ hazardSource: flakySource });
+
+    await expect(system.ingestAndProcess()).rejects.toThrow();
+    expect(system.getSourceHealth()).toBe(SourceHealthStatus.UNAVAILABLE);
+
+    await system.ingestAndProcess();
+    expect(system.getSourceHealth()).toBe(SourceHealthStatus.HEALTHY);
+  });
+});
+
+describe("HazardWarningSystem — ingestion failure isolation and replay flagging (audit findings H1, replay-of-old-warning)", () => {
+  function fakeHazardSourceWithFailureAndStaleAlert() {
+    const staleAlert = reissueOne({
+      alert_id: "urn:oid:test.stale-in-system",
+      event_id: "urn:oid:test.stale-in-system",
+      expires: "2026-09-19T08:00:00+11:00",
+      retrieved_at: "2026-09-21T08:35:00+11:00",
+    });
+    return {
+      sourceName: "FAKE",
+      async fetchAlerts() {
+        return {
+          alerts: [staleAlert],
+          failures: [{ url: "https://example.test/bad.xml", error: "Not a CAP alert document", occurredAt: "2026-09-21T08:00:00Z" }],
+        };
+      },
+    };
+  }
+
+  it("audit-logs a per-item ingestion failure distinctly, without losing the alert(s) that did parse", async () => {
+    const hazardSource = fakeHazardSourceWithFailureAndStaleAlert();
+    const { system } = buildSystem({ hazardSource });
+
+    const results = await system.ingestAndProcess();
+
+    expect(results).toHaveLength(1); // the stale alert still comes through — flagged, not dropped
+
+    const failureEntries = system.getAuditEntries().filter((e) => e.action === "INGESTION_ITEM_FAILURE");
+    expect(failureEntries).toHaveLength(1);
+    expect(failureEntries[0].subject).toBe("https://example.test/bad.xml");
+    expect(failureEntries[0].outcome).toBe("SKIPPED");
+    expect(failureEntries[0].details.error).toBe("Not a CAP alert document");
+  });
+
+  it("flags a suspiciously-stale alert both on the result and as a distinct SUSPECTED_REPLAY audit entry", async () => {
+    const hazardSource = fakeHazardSourceWithFailureAndStaleAlert();
+    const { system } = buildSystem({ hazardSource });
+
+    const [result] = await system.ingestAndProcess();
+    expect(result.isSuspiciouslyStale).toBe(true);
+
+    const replayEntries = system.getAuditEntries().filter((e) => e.action === "SUSPECTED_REPLAY");
+    expect(replayEntries).toHaveLength(1);
+    expect(replayEntries[0].outcome).toBe("FLAGGED");
+    expect(replayEntries[0].subject).toBe("urn:oid:test.stale-in-system");
+
+    // Distinct action name from the ingestion-item-failure category above —
+    // these are different failure modes and must not be conflated.
+    expect(replayEntries[0].action).not.toBe("INGESTION_ITEM_FAILURE");
+    expect(system.verifyAuditChain()).toEqual({ valid: true });
   });
 });

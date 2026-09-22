@@ -19,6 +19,28 @@ import { createAlert } from "./Alert.js";
  */
 export const DEFAULT_ADJACENCY_GRACE_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * Threat-model gap closed here (docs/PROJECT_HANDOFF.md: "replay of an old
+ * warning"): nothing previously rejected or even flagged a fetched CAP
+ * payload whose `expires` was already well in the past by the time it was
+ * retrieved — dedup only ever asked "does this match an existing event?",
+ * never "does this look like a stale/previously-expired warning being fed
+ * back in?" (by a compromised or misconfigured source, a replay attack, or
+ * a badly broken clock somewhere upstream).
+ *
+ * This is a *small* grace window, deliberately much tighter than
+ * DEFAULT_ADJACENCY_GRACE_MS above — that constant exists to recognize a
+ * *legitimate* reissue arriving hours after the prior message's expiry;
+ * this one exists to catch the opposite case, an alert arriving already
+ * expired *relative to its own retrieval*. A genuine SIMS alert is never
+ * observed arriving already-expired (every live sample has `expires` well
+ * in the future of `retrieved_at`), so 5 minutes is generous headroom for
+ * ordinary clock skew/poll-cycle timing without meaningfully weakening the
+ * check — a real replay of an old warning would typically be stale by
+ * hours or days, not minutes.
+ */
+export const REPLAY_STALENESS_GRACE_MS = 5 * 60 * 1000;
+
 function toEpochMs(isoString) {
   if (!isoString) return null;
   const ms = Date.parse(isoString);
@@ -124,6 +146,32 @@ export function isSameEvent(a, b, options = {}) {
 }
 
 /**
+ * True if an alert's own `expires` already predates its own `retrieved_at`
+ * by more than REPLAY_STALENESS_GRACE_MS — i.e. it arrived already expired.
+ * Pure, and deliberately independent of dedup/event-correlation: this is a
+ * timing-integrity check on one alert in isolation, not a comparison
+ * against any other alert, so it still catches a stale payload even as the
+ * very first thing ingested for a brand-new event_id (dedup alone can only
+ * ever compare against something already seen).
+ *
+ * Returns `false` (not "suspicious") when either timestamp is missing or
+ * unparseable — there's nothing to evaluate a timing gap against, and
+ * that's a malformed-input concern (see SIMSCAPAdapter's per-item error
+ * handling), not a replay-timing one.
+ *
+ * @param {import("./Alert.js").Alert} alert
+ * @param {{ replayGraceMs?: number }} [options]
+ * @returns {boolean}
+ */
+export function isSuspiciouslyStale(alert, options = {}) {
+  const replayGraceMs = options.replayGraceMs ?? REPLAY_STALENESS_GRACE_MS;
+  const expiresMs = toEpochMs(alert.expires);
+  const retrievedAtMs = toEpochMs(alert.retrieved_at);
+  if (expiresMs === null || retrievedAtMs === null) return false;
+  return expiresMs < retrievedAtMs - replayGraceMs;
+}
+
+/**
  * Runs incoming alerts against a store of recently-seen ones, assigning each
  * a real, shared `event_id` when it matches a prior reading (per
  * isSameEvent) rather than leaving the ingestion-stage placeholder
@@ -134,13 +182,25 @@ export function isSameEvent(a, b, options = {}) {
  *
  * Keeps every reading per event (not just the latest) so sourceHierarchy.js
  * can compare them later.
+ *
+ * Also flags (not rejects) a suspiciously-stale alert per isSuspiciouslyStale
+ * above — flagged rather than dropped for the same reason sourceHierarchy.js
+ * never discards a disagreeing reading: multiple human checkpoints already
+ * sit between here and an actual send (lifecycle classification, approval,
+ * rate limiting), so silently discarding data here would remove something
+ * an operator might need to see (e.g. "why is this source replaying old
+ * warnings?") without actually closing any real hole downstream. A caller
+ * that wants a harder line (excluding a flagged alert from further
+ * processing entirely) can do so using this flag — that policy choice
+ * belongs to the caller, not to this service.
  */
 export class DedupService {
   /**
-   * @param {{ adjacencyGraceMs?: number }} [options]
+   * @param {{ adjacencyGraceMs?: number, replayGraceMs?: number }} [options]
    */
   constructor(options = {}) {
     this.adjacencyGraceMs = options.adjacencyGraceMs ?? DEFAULT_ADJACENCY_GRACE_MS;
+    this.replayGraceMs = options.replayGraceMs ?? REPLAY_STALENESS_GRACE_MS;
     /** @type {Map<string, import("./Alert.js").Alert[]>} */
     this.readingsByEventId = new Map();
   }
@@ -152,6 +212,7 @@ export class DedupService {
    *   isReissue: boolean,
    *   matchedAlert: import("./Alert.js").Alert|null,
    *   priorReadingsForEvent: import("./Alert.js").Alert[],
+   *   isSuspiciouslyStale: boolean,
    * }}
    */
   ingest(alert) {
@@ -167,6 +228,7 @@ export class DedupService {
       isReissue: Boolean(matchedAlert),
       matchedAlert: matchedAlert ?? null,
       priorReadingsForEvent,
+      isSuspiciouslyStale: isSuspiciouslyStale(alert, { replayGraceMs: this.replayGraceMs }),
     };
   }
 

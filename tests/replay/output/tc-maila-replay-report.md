@@ -1,6 +1,6 @@
 # TC Maila Replay Report
 
-Generated 2026-09-22T08:54:20.506Z. Replays 21 reconstructed SIMS warnings for Tropical Cyclone Maila (5-11 Apr 2026) through ingestion's output shape -> dedup -> lifecycle -> geo mapping, in chronological order.
+Generated 2026-09-22T11:47:03.717Z. Replays 21 reconstructed SIMS warnings for Tropical Cyclone Maila (5-11 Apr 2026) through ingestion's output shape -> dedup -> lifecycle -> geo mapping, in chronological order.
 
 ## Data provenance — read this before trusting anything below
 
@@ -63,9 +63,9 @@ Two things explain every entry in that extra list, and neither is a pipeline def
 
 | Stage | Samples | Mean | Min | Max |
 |---|---|---|---|---|
-| dedup | 21 | 0.125ms | 0.052ms | 0.601ms |
-| lifecycle | 21 | 0.040ms | 0.010ms | 0.351ms |
-| geo | 21 | 196.962ms | 71.752ms | 419.204ms |
+| dedup | 21 | 0.096ms | 0.032ms | 0.532ms |
+| lifecycle | 21 | 0.024ms | 0.006ms | 0.150ms |
+| geo | 21 | 125.935ms | 35.347ms | 222.330ms |
 
 These times reflect pure in-memory computation on this dataset only (21 warnings, 10 boundary units) — they say nothing about real network/fetch latency, which doesn't exist in a fixture-driven replay. Useful as a relative comparison across stages and a regression baseline, not as a production latency estimate.
 

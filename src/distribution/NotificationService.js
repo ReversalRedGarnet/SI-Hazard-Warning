@@ -87,11 +87,12 @@ export class NotificationService {
    * approval decision itself. NotificationService only ever checks that
    * `message.status === APPROVED`; it doesn't know or care which
    * ApprovalWorkflow request produced that approval, so nothing here
-   * re-verifies the approval workflow's role/approver rules. Wiring an
-   * approved ApprovalWorkflow request's outcome through to an actual
-   * NotificationService.send() call is left to whatever future caller
-   * orchestrates the two — not built here, since no such orchestrator
-   * exists yet in this codebase.
+   * re-verifies the approval workflow's role/approver rules. That
+   * verification — checking a matching ApprovalWorkflow request actually
+   * reached APPROVED, under the right profile, for this exact alert +
+   * message, before ever calling send() — is done by the orchestrator,
+   * src/governance/ApprovedSend.js (see this class's own docstring above),
+   * not by this method itself.
    *
    * @param {{
    *   alertId: string,
