@@ -2,6 +2,8 @@ import { createOutboundMessage, OutboundMessageStatus } from "./OutboundMessage.
 import { computeIdempotencyKey } from "./idempotency.js";
 import { GatewayTimeoutError } from "./SmsProvider.js";
 import { ConstructionStatus } from "./messageConstruction.js";
+import { EnvironmentMode, requireEnvironmentMode } from "../governance/EnvironmentMode.js";
+import { syntheticPhoneNumberFor } from "../governance/testModeRecipients.js";
 
 /**
  * Statuses where a record already represents an in-flight-or-done send —
@@ -27,39 +29,78 @@ const IN_FLIGHT_OR_DONE = new Set([
  * decision itself — it does not rely on the provider being idempotent,
  * since MockSMSProvider (and likely a real aggregator) has no reason to
  * deduplicate on our behalf.
+ *
+ * Also the enforcement point for the environment-mode safety rail
+ * (src/governance/EnvironmentMode.js): `environmentMode` is a required
+ * constructor argument (validated via requireEnvironmentMode, which throws
+ * rather than defaulting) so this can never silently run in an
+ * unconfigured mode. When that mode is TEST, send() rewrites the outbound
+ * phoneNumber to a synthetic one (src/governance/testModeRecipients.js)
+ * *unconditionally*, inside send() itself, before the provider is ever
+ * called — not as a check a caller could forget, but as the one code path
+ * every send must go through to reach a provider at all. Passing real
+ * subscriber data through in TEST mode still cannot reach a real number.
  */
 export class NotificationService {
   /**
-   * @param {{ provider: import("./SmsProvider.js").SmsProvider, store: import("./OutboundMessageStore.js").OutboundMessageStore }} deps
+   * @param {{
+   *   provider: import("./SmsProvider.js").SmsProvider,
+   *   store: import("./OutboundMessageStore.js").OutboundMessageStore,
+   *   environmentMode: string,
+   *   auditLog?: import("../governance/AuditLog.js").AuditLog,
+   * }} deps
    */
-  constructor({ provider, store }) {
+  constructor({ provider, store, environmentMode, auditLog }) {
     this.provider = provider;
     this.store = store;
+    this.environmentMode = requireEnvironmentMode(environmentMode);
+    this.auditLog = auditLog ?? null;
   }
 
   /**
    * Sends (or, if this exact alert x recipient x channel is already
    * in-flight or done, returns the existing record instead of resending).
    *
+   * `triggeredBy` is optional and purely for audit attribution (who/what
+   * role caused this particular send call) — it plays no role in the
+   * approval decision itself. NotificationService only ever checks that
+   * `message.status === APPROVED`; it doesn't know or care which
+   * ApprovalWorkflow request produced that approval, so nothing here
+   * re-verifies the approval workflow's role/approver rules. Wiring an
+   * approved ApprovalWorkflow request's outcome through to an actual
+   * NotificationService.send() call is left to whatever future caller
+   * orchestrates the two — not built here, since no such orchestrator
+   * exists yet in this codebase.
+   *
    * @param {{
    *   alertId: string,
    *   recipient: { recipientId: string, phoneNumber: string },
    *   channel: string,
    *   message: import("./messageConstruction.js").ConstructedMessage,
+   *   triggeredBy?: import("../governance/Role.js").User,
    * }} params
    * @returns {Promise<{ outboundMessage: import("./OutboundMessage.js").OutboundMessage, deduped: boolean }>}
    */
-  async send({ alertId, recipient, channel, message }) {
+  async send({ alertId, recipient, channel, message, triggeredBy }) {
     if (message.status !== ConstructionStatus.APPROVED) {
       throw new Error(`Cannot send a message that isn't APPROVED (status: ${message.status})`);
     }
 
+    // recipient_id (an internal id, never a phone number) is left untouched
+    // even in TEST mode, so the OutboundMessage record still shows who the
+    // send was *intended* for — only the outbound phoneNumber actually
+    // reaching the provider is replaced.
     const idempotencyKey = computeIdempotencyKey(alertId, recipient.recipientId, channel);
     const existing = this.store.findByIdempotencyKey(idempotencyKey);
 
     if (existing && IN_FLIGHT_OR_DONE.has(existing.status)) {
       return { outboundMessage: existing, deduped: true };
     }
+
+    const effectiveRecipient =
+      this.environmentMode === EnvironmentMode.TEST
+        ? { ...recipient, phoneNumber: syntheticPhoneNumberFor(recipient.recipientId) }
+        : recipient;
 
     let record = createOutboundMessage({
       alert_id: alertId,
@@ -77,7 +118,7 @@ export class NotificationService {
     this.store.save(record);
 
     try {
-      const result = await this.provider.send(recipient, message.text);
+      const result = await this.provider.send(effectiveRecipient, message.text);
       record = createOutboundMessage({
         ...record,
         status: result.accepted ? OutboundMessageStatus.ACCEPTED : OutboundMessageStatus.FAILED,
@@ -89,6 +130,22 @@ export class NotificationService {
     }
 
     this.store.save(record);
+
+    this.auditLog?.record({
+      actorUserId: triggeredBy?.user_id ?? null,
+      actorRole: triggeredBy?.role ?? null,
+      action: "SEND",
+      subject: record.idempotency_key,
+      outcome: record.status,
+      details: {
+        alertId,
+        recipientId: recipient.recipientId,
+        channel,
+        attempt: record.attempt,
+        environmentMode: this.environmentMode,
+      },
+    });
+
     return { outboundMessage: record, deduped: false };
   }
 }

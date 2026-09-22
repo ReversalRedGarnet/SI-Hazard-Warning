@@ -11,6 +11,7 @@ import { OutboundMessageStore } from "../../src/distribution/OutboundMessageStor
 import { MockSMSProvider } from "../../src/distribution/MockSMSProvider.js";
 import { OutboundMessageStatus } from "../../src/distribution/OutboundMessage.js";
 import { buildMessage, approveMessage } from "../../src/distribution/messageConstruction.js";
+import { EnvironmentMode } from "../../src/governance/EnvironmentMode.js";
 
 /**
  * Full pipeline wiring test: geo mapping -> subscriber matching -> recipient
@@ -89,7 +90,7 @@ describe("geo -> subscribers -> distribution end-to-end wiring", () => {
 
     const store = new OutboundMessageStore();
     const provider = new MockSMSProvider({ script: [{ type: "accept", providerMessageId: "prov-e2e-1" }] });
-    const service = new NotificationService({ provider, store });
+    const service = new NotificationService({ provider, store, environmentMode: EnvironmentMode.DEVELOPMENT });
 
     const results = await Promise.all(
       recipients.map((recipient) =>

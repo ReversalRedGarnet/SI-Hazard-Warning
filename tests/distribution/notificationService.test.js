@@ -4,6 +4,13 @@ import { OutboundMessageStore } from "../../src/distribution/OutboundMessageStor
 import { MockSMSProvider } from "../../src/distribution/MockSMSProvider.js";
 import { OutboundMessageStatus } from "../../src/distribution/OutboundMessage.js";
 import { buildMessage, approveMessage } from "../../src/distribution/messageConstruction.js";
+import { EnvironmentMode } from "../../src/governance/EnvironmentMode.js";
+
+// These tests exercise NotificationService's own send/retry/dedup logic, not
+// the TEST-mode recipient override (that has its own dedicated test file:
+// tests/governance/notificationServiceTestMode.test.js) — DEVELOPMENT mode
+// here means recipient.phoneNumber passes through unchanged, matching this
+// suite's original assertions.
 
 const RECIPIENT = { recipientId: "sub-1", phoneNumber: "+67712345678" };
 const ALERT_ID = "urn:oid:test-alert-1";
@@ -35,7 +42,7 @@ describe("NotificationService", () => {
 
   it("accepts a message and records ACCEPTED with a provider_message_id", async () => {
     const provider = new MockSMSProvider({ script: [{ type: "accept", providerMessageId: "prov-1" }] });
-    const service = new NotificationService({ provider, store });
+    const service = new NotificationService({ provider, store, environmentMode: EnvironmentMode.DEVELOPMENT });
 
     const { outboundMessage, deduped } = await service.send({
       alertId: ALERT_ID,
@@ -59,7 +66,7 @@ describe("NotificationService", () => {
     const provider = new MockSMSProvider({
       script: [{ type: "timeout" }, { type: "accept", providerMessageId: "prov-2" }],
     });
-    const service = new NotificationService({ provider, store });
+    const service = new NotificationService({ provider, store, environmentMode: EnvironmentMode.DEVELOPMENT });
     const message = approvedTestMessage();
 
     const first = await service.send({ alertId: ALERT_ID, recipient: RECIPIENT, channel: CHANNEL, message });
@@ -79,7 +86,7 @@ describe("NotificationService", () => {
 
   it("does not re-submit to the provider for an already-accepted send (idempotent no-op)", async () => {
     const provider = new MockSMSProvider({ script: [{ type: "accept", providerMessageId: "prov-3" }] });
-    const service = new NotificationService({ provider, store });
+    const service = new NotificationService({ provider, store, environmentMode: EnvironmentMode.DEVELOPMENT });
     const message = approvedTestMessage();
 
     await service.send({ alertId: ALERT_ID, recipient: RECIPIENT, channel: CHANNEL, message });
@@ -98,7 +105,7 @@ describe("NotificationService", () => {
         { type: "accept", providerMessageId: "prov-4" },
       ],
     });
-    const service = new NotificationService({ provider, store });
+    const service = new NotificationService({ provider, store, environmentMode: EnvironmentMode.DEVELOPMENT });
     const message = approvedTestMessage();
 
     const first = await service.send({ alertId: ALERT_ID, recipient: RECIPIENT, channel: CHANNEL, message });
@@ -112,7 +119,7 @@ describe("NotificationService", () => {
 
   it("treats the same alert to a different recipient (or a different channel) as a distinct send", async () => {
     const provider = new MockSMSProvider({ script: [{ type: "accept" }, { type: "accept" }] });
-    const service = new NotificationService({ provider, store });
+    const service = new NotificationService({ provider, store, environmentMode: EnvironmentMode.DEVELOPMENT });
     const message = approvedTestMessage();
 
     await service.send({ alertId: ALERT_ID, recipient: RECIPIENT, channel: CHANNEL, message });
@@ -123,7 +130,7 @@ describe("NotificationService", () => {
 
   it("refuses to send a message that hasn't been approved", async () => {
     const provider = new MockSMSProvider();
-    const service = new NotificationService({ provider, store });
+    const service = new NotificationService({ provider, store, environmentMode: EnvironmentMode.DEVELOPMENT });
     const unapproved = buildMessage({
       templateId: "hazard-warning",
       language: "en",
