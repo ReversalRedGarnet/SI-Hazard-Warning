@@ -6,11 +6,18 @@ import { createAlert } from "./Alert.js";
  * windows — e.g. one observed "Number 217" reissue arrived 1h32m after the
  * prior message's own `expires` had already passed (16:00 -> next sent at
  * 17:32). A strict overlap check would treat that as two different events,
- * which is wrong. 6h is chosen because it's the doc's own stated lower bound
- * for reissue cadence ("roughly every 6-24 hours"), so a gap under 6h reads
- * as "still the same ongoing warning," not a coincidence.
+ * which is wrong.
+ *
+ * Originally set to 6h (the doc's stated *lower* bound for reissue cadence,
+ * "roughly every 6-24 hours"). The TC Maila replay (tests/replay/) caught
+ * this as too tight: a late-cycle reissue landed ~16h after the prior
+ * message's expiry — well within the doc's own normal range — and 6h grace
+ * incorrectly split one continuous event into two event_ids. Using the
+ * lower bound as the grace period was the bug: the grace period has to
+ * cover the full documented cadence range, not just its fast end. Set to
+ * the doc's stated *upper* bound instead.
  */
-export const DEFAULT_ADJACENCY_GRACE_MS = 6 * 60 * 60 * 1000;
+export const DEFAULT_ADJACENCY_GRACE_MS = 24 * 60 * 60 * 1000;
 
 function toEpochMs(isoString) {
   if (!isoString) return null;
