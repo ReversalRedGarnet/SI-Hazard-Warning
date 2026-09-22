@@ -40,6 +40,27 @@ const IN_FLIGHT_OR_DONE = new Set([
  * called — not as a check a caller could forget, but as the one code path
  * every send must go through to reach a provider at all. Passing real
  * subscriber data through in TEST mode still cannot reach a real number.
+ *
+ * Design decision — send() stays directly callable, with no approval
+ * reference required here: making an approval token a required
+ * constructor/call argument would be the safer default in isolation, but
+ * this class already has ~15+ direct call sites across
+ * tests/distribution/notificationService.test.js,
+ * tests/subscribers/endToEnd.test.js, and
+ * tests/governance/notificationServiceTestMode.test.js that test its own
+ * retry/dedup/segment/environment-mode behavior in isolation from any
+ * approval workflow — requiring a token here would force all of them to
+ * fabricate one, which is exactly the "rebuild the module" this stage was
+ * scoped to avoid. The actual RBAC enforcement point is
+ * src/governance/ApprovedSend.js: it's the only path that both calls
+ * send() and verifies a matching ApprovalWorkflow request reached
+ * APPROVED first. The residual risk this leaves is real and explicit: any
+ * future caller that reaches for `new NotificationService(...).send(...)`
+ * directly (in non-test code) bypasses governance entirely, and nothing
+ * in this class stops that. Closing that gap for good would mean either
+ * this token requirement (with the test-scaffolding cost above) or an
+ * unforgeable capability object only ApprovedSend.js can mint — both
+ * bigger changes than "wire the two together," so neither was built here.
  */
 export class NotificationService {
   /**
