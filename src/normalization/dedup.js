@@ -47,6 +47,34 @@ function sameHazardType(a, b) {
   return a.hazard_type.trim().toLowerCase() === b.hazard_type.trim().toLowerCase();
 }
 
+function eventCodesOf(alert) {
+  return alert.source_metadata?.eventCode ?? [];
+}
+
+/**
+ * Compares CAP `eventCode` entries (each `{valueName, value}`) between two
+ * alerts. Returns `null`, not `false`, when either side has none — that's
+ * the "not applicable, fall back" signal matchesEventPattern uses, distinct
+ * from "compared and didn't match".
+ */
+function sameEventCode(a, b) {
+  const codesA = eventCodesOf(a);
+  const codesB = eventCodesOf(b);
+  if (codesA.length === 0 || codesB.length === 0) return null;
+  return codesA.some((ca) => codesB.some((cb) => ca.valueName === cb.valueName && ca.value === cb.value));
+}
+
+/**
+ * The "eventCode/headline pattern" half of the match, preferring eventCode
+ * when both alerts have one and falling back to hazard_type when either
+ * doesn't (e.g. a source/older payload that never populated it).
+ */
+function matchesEventPattern(a, b) {
+  const eventCodeResult = sameEventCode(a, b);
+  if (eventCodeResult !== null) return eventCodeResult;
+  return sameHazardType(a, b);
+}
+
 /**
  * True if `a` and `b` are reissues of the same underlying warning episode
  * rather than two independent events. Pure — no I/O, no store lookups.
@@ -57,18 +85,13 @@ function sameHazardType(a, b) {
  *   `eventCode` (e.g. "OET-218") turns out to stay constant across an
  *   entire reissue episode (verified live: three consecutive reissues
  *   numbered 216-218 in their headlines all carried eventCode "OET-218"),
- *   which would make it a strong correlator — but it's parsed by
- *   capParser.js's internal representation only and was never carried onto
- *   the Alert or into source_metadata (same gap `scope` had before it was
- *   added last time), and this change is scoped to src/normalization/ only.
- *   `hazard_type` (CAP's `<event>`, e.g. "Strong Wind") is used instead: for
- *   every SIMS sample seen, it's exactly the stable substring of the
- *   headline left after stripping the sequence number and alert-color
- *   suffix, so it serves the same "headline pattern" role without needing
- *   raw headline text, which also isn't on the Alert schema. Recommend
- *   surfacing CAP `eventCode` (and `sent`) into source_metadata in a
- *   follow-up ingestion change — it would be a strictly stronger signal
- *   than this.
+ *   so it's used as the primary signal now that ingestion carries it in
+ *   source_metadata. `hazard_type` (CAP's `<event>`, e.g. "Strong Wind") is
+ *   the fallback for a source or older payload that doesn't populate
+ *   eventCode: for every SIMS sample seen, it's exactly the stable
+ *   substring of the headline left after stripping the sequence number and
+ *   alert-color suffix, so it serves the same "headline pattern" role
+ *   without needing raw headline text, which isn't on the Alert schema.
  * - "Overlapping validity window" is read as "overlapping, or separated by
  *   no more than DEFAULT_ADJACENCY_GRACE_MS" — see that constant's comment.
  *   A strict overlap check fails against real observed data.
@@ -90,7 +113,7 @@ export function isSameEvent(a, b, options = {}) {
   if (a.alert_id === b.alert_id) return true;
   if (a.source !== b.source) return false;
 
-  return sameHazardType(a, b) && windowsOverlapWithGrace(a, b, adjacencyGraceMs);
+  return matchesEventPattern(a, b) && windowsOverlapWithGrace(a, b, adjacencyGraceMs);
 }
 
 /**

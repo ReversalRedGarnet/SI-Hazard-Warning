@@ -43,6 +43,10 @@ describe("SIMSCAPAdapter against the live SIMS feed", () => {
       expect(alert.status).toBe("Actual");
       expect(alert.msg_type).toBe("Alert");
       expect(alert.source_metadata.scope).toBe("Public");
+      expect(typeof alert.source_metadata.sent).toBe("string");
+      expect(alert.source_metadata.eventCode.length).toBeGreaterThan(0);
+      expect(alert.source_metadata.eventCode[0]).toHaveProperty("valueName");
+      expect(alert.source_metadata.eventCode[0]).toHaveProperty("value");
       expect(["Minor", "Moderate", "Severe", "Extreme", "Unknown"]).toContain(alert.severity);
       expect(["Immediate", "Expected", "Future", "Past", "Unknown"]).toContain(alert.urgency);
       expect(["Observed", "Likely", "Possible", "Unlikely", "Unknown"]).toContain(alert.certainty);
@@ -60,6 +64,35 @@ describe("SIMSCAPAdapter against the live SIMS feed", () => {
 
       expect(typeof alert.instructions).toBe("string");
       expect(alert.instructions.length).toBeGreaterThan(0);
+    },
+    LIVE_TIMEOUT_MS,
+  );
+
+  it(
+    "keeps eventCode stable across reissues of the same warning episode",
+    async () => {
+      // Manually confirmed 2026-09-22: three consecutive "Strong Wind
+      // Warning" reissues (headline numbers 216-218) all carried the same
+      // eventCode value ("OET-218") even though the headline's own sequence
+      // number changed every time. This re-checks that against whatever the
+      // feed is actually publishing right now, since the feed is live and
+      // could have moved on to a new, single-message episode by the time
+      // this runs — in which case there'd be nothing to compare and the
+      // test is skipped rather than failed.
+      const adapter = new SIMSCAPAdapter();
+      const items = await adapter.fetchIndex();
+      if (items.length < 2) return;
+
+      const [newer, older] = await Promise.all([adapter.fetchAlert(items[0]), adapter.fetchAlert(items[1])]);
+
+      const sameHazard = newer.hazard_type === older.hazard_type;
+      const overlappingEnough =
+        Date.parse(older.expires) > Date.parse(newer.source_metadata.sent) - 24 * 60 * 60 * 1000;
+      if (!sameHazard || !overlappingEnough) return; // feed moved on to an unrelated episode; nothing to compare
+
+      expect(newer.source_metadata.eventCode.length).toBeGreaterThan(0);
+      expect(older.source_metadata.eventCode.length).toBeGreaterThan(0);
+      expect(newer.source_metadata.eventCode).toEqual(older.source_metadata.eventCode);
     },
     LIVE_TIMEOUT_MS,
   );

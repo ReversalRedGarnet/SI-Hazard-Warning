@@ -87,6 +87,7 @@ export function parseCapXml(xml) {
       instruction: info.instruction ?? null,
       web: info.web ?? null,
       contact: info.contact ?? null,
+      eventCode: toArray(info.eventCode).map((ec) => ({ valueName: ec.valueName, value: ec.value })),
       parameters: toArray(info.parameter).map((p) => ({ valueName: p.valueName, value: p.value })),
       areas: toArray(info.area).map(parseArea),
     })),
@@ -106,9 +107,15 @@ export function parseCapXml(xml) {
  * event_id = alert_id, i.e. every message is treated as its own event until
  * dedup/correlation is built.
  *
- * CAP's `scope` has no field of its own in the Alert schema, so it's carried
- * in source_metadata alongside adapter-specific extras.
+ * CAP's `scope`, `sent` and `eventCode` have no field of their own in the
+ * Alert schema, so they're carried in source_metadata alongside
+ * adapter-specific extras. `eventCode` in particular matters beyond
+ * ingestion: verified live, SIMS keeps the same eventCode value constant
+ * across an entire reissue episode (unlike the sequence number embedded in
+ * the headline, which increments every message) — normalization's dedup
+ * prefers it over hazard_type as the event-correlation key when present.
  *
+
  * @param {ReturnType<typeof parseCapXml>} capDoc
  * @param {{
  *   authoritativeForLocalWarning: boolean,
@@ -138,7 +145,12 @@ export function capToAlertFields(capDoc, options) {
     references: capDoc.references,
     authoritative_for_local_warning: options.authoritativeForLocalWarning,
     raw_payload: options.rawPayload,
-    source_metadata: { ...options.sourceMetadata, scope: capDoc.scope },
+    source_metadata: {
+      ...options.sourceMetadata,
+      scope: capDoc.scope,
+      sent: capDoc.sent,
+      eventCode: info.eventCode ?? [],
+    },
     raw_source_url: options.rawSourceUrl,
     retrieved_at: options.retrievedAt,
     payload_hash: sha256Hex(options.rawPayload),

@@ -1,11 +1,23 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { isSameEvent, DedupService } from "../../src/normalization/dedup.js";
 import { deriveLifecycleTransition } from "../../src/normalization/lifecycle.js";
-import { reissueOne, reissueTwo, unrelatedHazardType, unrelatedLaterEpisode } from "./fixtures.js";
+import {
+  reissueOne,
+  reissueTwo,
+  reissueWithDivergentHazardPhrasing,
+  unrelatedHazardType,
+  unrelatedLaterEpisode,
+} from "./fixtures.js";
 
 describe("isSameEvent", () => {
   it("matches two real reissues of the same warning despite non-overlapping windows", () => {
     expect(isSameEvent(reissueOne(), reissueTwo())).toBe(true);
+  });
+
+  it("matches on eventCode even when hazard_type phrasing disagrees", () => {
+    const divergent = reissueWithDivergentHazardPhrasing();
+    expect(divergent.hazard_type).not.toBe(reissueOne().hazard_type);
+    expect(isSameEvent(reissueOne(), divergent)).toBe(true);
   });
 
   it("does not match a different hazard type in the same window", () => {
